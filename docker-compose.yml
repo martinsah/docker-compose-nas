@@ -1,77 +1,97 @@
 services:
-  traefik:
-    image: ghcr.io/traefik/traefik:3.3
-    container_name: traefik
-    restart: always
-    environment:
-      - CLOUDFLARE_EMAIL=${CLOUDFLARE_EMAIL}
-      - CLOUDFLARE_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN}
-      - CLOUDFLARE_ZONE_API_TOKEN=${CLOUDFLARE_ZONE_API_TOKEN}
-      - LETS_ENCRYPT_EMAIL=${LETS_ENCRYPT_EMAIL}
-    command:
-      - --ping=true
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.web-secure.address=:443
-      - --entrypoints.web.http.redirections.entryPoint.to=web-secure
-      - --entrypoints.web.http.redirections.entryPoint.scheme=https
-      - --entrypoints.web.http.redirections.entrypoint.permanent=true
-      - --experimental.plugins.rewrite-body.modulename=github.com/packruler/rewrite-body
-      - --experimental.plugins.rewrite-body.version=v1.2.0
-      - --experimental.plugins.rewriteHeaders.modulename=github.com/XciD/traefik-plugin-rewrite-headers
-      - --experimental.plugins.rewriteHeaders.version=v0.0.3
-      - --certificatesresolvers.myresolver.acme.dnschallenge=${DNS_CHALLENGE:-true}
-      - --certificatesresolvers.myresolver.acme.dnschallenge.provider=${DNS_CHALLENGE_PROVIDER:-cloudflare}
-      - --certificatesresolvers.myresolver.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
-      - --certificatesresolvers.myresolver.acme.caserver=${LETS_ENCRYPT_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
-      - --certificatesresolvers.myresolver.acme.email=${LETS_ENCRYPT_EMAIL}
-      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+  nginx-proxy-manager:
+    container_name: npm
+    image: 'jc21/nginx-proxy-manager:latest'
+    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - '80:80'
+      - '81:81'
+      - '443:443'
+      # Map IPv6 port 80 dynamically across host changes
+      - target: 80
+        published: 80
+        host_ip: "::"
+        mode: ingress
+      # Map IPv6 port 443 dynamically across host changes
+      - target: 443
+        published: 443
+        host_ip: "::"
+        mode: ingress
     volumes:
-      - ${CONFIG_ROOT:-.}/letsencrypt:/letsencrypt
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-    extra_hosts:
-      - host.docker.internal:172.17.0.1
-    healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
-      interval: 30s
-      retries: 10
-  sonarr:
-    image: lscr.io/linuxserver/sonarr
-    container_name: sonarr
+      - ${CONFIG_ROOT}/nginx-proxy-manager/data:/data
+      - ${CONFIG_ROOT}/nginx-proxy-manager/letsencrypt:/etc/letsencrypt
+    networks:
+      - vpn_network
+      - default
+  firefox:
+    image: lscr.io/linuxserver/firefox:latest
+    network_mode: "service:vpn"
+    container_name: firefox
+    security_opt:
+      - seccomp:unconfined #optional
     environment:
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
-      - TZ=${TIMEZONE}
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - FIREFOX_CLI=https://www.linuxserver.io/ #optional
+      - SELKIES_SCALING_DPI="144"
+      - GDK_SCALE=2
     volumes:
-      - ${CONFIG_ROOT:-.}/sonarr:/config
-      - ${DATA_ROOT}:/data
-    restart: always
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8989/sonarr/ping"]
-      interval: 30s
-      retries: 10
+      - ${CONFIG_ROOT}/firefox:/config
+      - ${DOWNLOAD2_ROOT}/tk/qb2-torrent-files:/data
+      - ${DOWNLOAD2_ROOT}:/data_media
+    shm_size: "1gb"
+    restart: unless-stopped
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    container_name: jackett
+    networks:
+      - default
+      - vpn_network
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - AUTO_UPDATE=true #optional
+      - RUN_OPTS= #optional
+    volumes:
+      - ${CONFIG_ROOT}/jackett:/config
+      - ${DATA_ROOT}/jackett:/downloads
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.sonarr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/sonarr`))
-      - traefik.http.routers.sonarr.tls=true
-      - traefik.http.routers.sonarr.tls.certresolver=myresolver
-      - traefik.http.services.sonarr.loadbalancer.server.port=8989
-      - homepage.group=Media
-      - homepage.name=Sonarr
-      - homepage.icon=sonarr.png
-      - homepage.href=/sonarr
-      - homepage.description=Series management
-      - homepage.weight=0
-      - homepage.widget.type=sonarr
-      - homepage.widget.url=http://sonarr:8989/sonarr
-      - homepage.widget.key=${SONARR_API_KEY}
+      - homepage.group=Download
+      - homepage.name=Jackett
+      - homepage.icon=jackett.png
+      - homepage.api_key=${JACKETT_API_KEY}
+      - homepage.href=https://jackett.${HOSTNAME}
+      - homepage.description=Meta Indexer
+      - homepage.weight=1
+      - homepage.widget.type=jackett
+      - homepage.widget.url=http://jackett:9117/
+      - homepage.widget.key=${JACKETT_API_KEY}
+#  flaresolverr:
+#    image: ghcr.io/flaresolverr/flaresolverr:latest
+#    container_name: flaresolverr
+#    environment:
+#      - LOG_LEVEL=${LOG_LEVEL:-info}  # Sets the logging level (e.g., info, debug)
+#      - LOG_HTML=${LOG_HTML:-false} # Logs the HTML if true (for debugging)
+
+#    ports:
+#      - "${PORT:-8191}:8191" # Maps port 8191 in the container to your host machine
+#    restart: unless-stopped
+#    networks:
+#      - vpn_network
+#      - default
   radarr:
     image: lscr.io/linuxserver/radarr
     container_name: radarr
+    networks:
+      - vpn_network
+      - default
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -79,26 +99,26 @@ services:
     volumes:
       - ${CONFIG_ROOT:-.}/radarr:/config
       - ${DATA_ROOT}:/data
-    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:7878/radarr/ping"]
       interval: 30s
       retries: 10
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.radarr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/radarr`))
-      - traefik.http.routers.radarr.tls=true
-      - traefik.http.routers.radarr.tls.certresolver=myresolver
-      - traefik.http.services.radarr.loadbalancer.server.port=7878
       - homepage.group=Media
       - homepage.name=Radarr
       - homepage.icon=radarr.png
-      - homepage.href=/radarr
+      - homepage.href=https://radarr.${HOSTNAME}
       - homepage.description=Movies management
       - homepage.weight=1
       - homepage.widget.type=radarr
       - homepage.widget.url=http://radarr:7878/radarr
       - homepage.widget.key=${RADARR_API_KEY}
+
   lidarr:
     image: lscr.io/linuxserver/lidarr
     container_name: lidarr
@@ -109,245 +129,41 @@ services:
     volumes:
       - ${CONFIG_ROOT:-.}/lidarr:/config
       - ${DATA_ROOT}:/data
-    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
+    ports:
+      - "8686:8686"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:8686/lidarr/ping"]
       interval: 30s
       retries: 10
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.lidarr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/lidarr`))
-      - traefik.http.routers.lidarr.tls=true
-      - traefik.http.routers.lidarr.tls.certresolver=myresolver
-      - traefik.http.services.lidarr.loadbalancer.server.port=8686
       - homepage.group=Media
       - homepage.name=Lidarr
       - homepage.icon=lidarr.png
-      - homepage.href=/lidarr
+      - homepage.href=https://lidarr.${HOSTNAME}
       - homepage.description=Music management
       - homepage.weight=2
       - homepage.widget.type=lidarr
-      - homepage.widget.url=http://lidarr:8686/lidarr
+      - homepage.widget.url=http://lidarr:8686
       - homepage.widget.key=${LIDARR_API_KEY}
     profiles:
       - lidarr
-  bazarr:
-    image: lscr.io/linuxserver/bazarr
-    container_name: bazarr
-    environment:
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
-      - TZ=${TIMEZONE}
-    volumes:
-      - ${CONFIG_ROOT:-.}/bazarr/config:/config
-      - ${DATA_ROOT}:/data
-    restart: always
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://127.0.0.1:6767/bazarr/ping"]
-      interval: 5s
-      retries: 10
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.bazarr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/bazarr`))
-      - traefik.http.routers.bazarr.tls=true
-      - traefik.http.routers.bazarr.tls.certresolver=myresolver
-      - traefik.http.services.bazarr.loadbalancer.server.port=6767
-      - homepage.group=Download
-      - homepage.name=Bazarr
-      - homepage.icon=bazarr.png
-      - homepage.href=/bazarr
-      - homepage.description=Subtitles management
-      - homepage.weight=4
-      - homepage.widget.type=bazarr
-      - homepage.widget.url=http://bazarr:6767/bazarr
-      - homepage.widget.key=${BAZARR_API_KEY}
-  jellyseerr:
-    image: ghcr.io/fallenbagel/jellyseerr:latest
-    container_name: jellyseerr
-    environment:
-      - LOG_LEVEL=debug
-      - TZ=${TIMEZONE}
-    volumes:
-      - ${CONFIG_ROOT:-.}/jellyseerr:/app/config
-    restart: always
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "http://127.0.0.1:5055/api/v1/status",
-          "-qO",
-          "/dev/null",
-        ]
-      interval: 30s
-      retries: 10
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.jellyseerr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/jellyseerr`))
-      - traefik.http.routers.jellyseerr.tls=true
-      - traefik.http.routers.jellyseerr.tls.certresolver=myresolver
-      - traefik.http.services.jellyseerr.loadbalancer.server.port=5055
-      - traefik.http.routers.jellyseerr.middlewares=jellyseerr-stripprefix,jellyseerr-rewrite,jellyseerr-rewriteHeaders
-      - traefik.http.middlewares.jellyseerr-stripprefix.stripPrefix.prefixes=/jellyseerr
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[0].header=location
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[0].regex=^/(.+)$
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[0].replacement=/jellyseerr/$1
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[1].header=location
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[1].regex=^/$
-      - traefik.http.middlewares.jellyseerr-rewriteHeaders.plugin.rewriteHeaders.rewrites[1].replacement=/jellyseerr
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.monitoring.types[0]=text/html
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.monitoring.types[1]=application/javascript
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.monitoring.types[2]=*/*
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.monitoring.types[3]=application/json
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[1].regex=/_next
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[1].replacement=/jellyseerr/_next
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[2].regex=\/_next\\/data\\//
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[2].replacement=\/jellyseerr\/_next\/data\//
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[3].regex=/api/v1
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[3].replacement=/jellyseerr/api/v1
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[4].regex=/login/plex/loading
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[4].replacement=/jellyseerr/login/plex/loading
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[5].regex=/images/
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[5].replacement=/jellyseerr/images/
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[6].regex=/favicon
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[6].replacement=/jellyseerr/favicon
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[7].regex=/logo_
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[7].replacement=/jellyseerr/logo_
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[8].regex=/site.webmanifest
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[8].replacement=/jellyseerr/site.webmanifest
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[9].regex=/sw.js
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[9].replacement=/jellyseerr/sw.js
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[10].regex=/offline.html
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[10].replacement=/jellyseerr/offline.html
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[11].regex=src="/os_logo_square.png"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[11].replacement=src="/jellyseerr/os_logo_square.png"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[12].regex=href([=:])"/([/a-zA-Z?=]*)"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[12].replacement=href$1"/jellyseerr/$2"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[13].regex=linkUrl:"/([/a-zA-Z?=]*)"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[13].replacement=linkUrl:"/jellyseerr/$1"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[14].regex="/([a-z]+)/".concat
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[14].replacement="/jellyseerr/$1/".concat
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[15].regex=url:"/([/a-zA-Z?=]*)"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[15].replacement=url:"/jellyseerr/$1"
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[16].regex=/imageproxy/
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[16].replacement=/jellyseerr/imageproxy/
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[17].regex=/avatarproxy/
-      - traefik.http.middlewares.jellyseerr-rewrite.plugin.rewrite-body.rewrites[17].replacement=/jellyseerr/avatarproxy/
-      - homepage.group=Media
-      - homepage.name=JellySeerr
-      - homepage.icon=jellyseerr.png
-      - homepage.href=/jellyseerr
-      - homepage.description=Content Recommendations and Request Management
-      - homepage.weight=3
-      - homepage.widget.type=jellyseerr
-      - homepage.widget.url=http://jellyseerr:5055
-      - homepage.widget.key=${JELLYSEERR_API_KEY}
-  prowlarr:
-    image: lscr.io/linuxserver/prowlarr:latest
-    container_name: prowlarr
-    environment:
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
-      - TZ=${TIMEZONE}
-    volumes:
-      - ${CONFIG_ROOT:-.}/prowlarr:/config
-    restart: always
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://127.0.0.1:9696/prowlarr/ping"]
-      interval: 30s
-      retries: 10
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.prowlarr.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/prowlarr`))
-      - traefik.http.routers.prowlarr.tls=true
-      - traefik.http.routers.prowlarr.tls.certresolver=myresolver
-      - traefik.http.services.prowlarr.loadbalancer.server.port=9696
-      - homepage.group=Download
-      - homepage.name=Prowlarr
-      - homepage.icon=prowlarr.png
-      - homepage.href=/prowlarr
-      - homepage.description=Indexers management
-      - homepage.weight=1
-      - homepage.widget.type=prowlarr
-      - homepage.widget.url=http://prowlarr:9696/prowlarr
-      - homepage.widget.key=${PROWLARR_API_KEY}
-  flaresolverr:
-    image: 21hsmw/flaresolverr:nodriver
-    container_name: flaresolverr
-    restart: always
-    environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_HTML=${LOG_HTML:-false}
-      - CAPTCHA_SOLVER=${CAPTCHA_SOLVER:-none}
-      - TZ=${TIMEZONE}
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.flaresolverr.rule=PathPrefix(`/flaresolverr`)
-      - traefik.http.routers.flaresolverr.tls=true
-      - traefik.http.services.flaresolverr.loadbalancer.server.port=8191
-    profiles:
-      - flaresolverr
-  qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:libtorrentv1
-    container_name: qbittorrent
-    environment:
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
-      - TZ=${TIMEZONE}
-      - WEBUI_PORT=8080
-      - DOCKER_MODS=ghcr.io/gabe565/linuxserver-mod-vuetorrent
-    volumes:
-      - ${CONFIG_ROOT:-.}/qbittorrent:/config
-      - ${DOWNLOAD_ROOT}:/data/torrents
-    restart: always
-    healthcheck:
-      # Container may fail if the PIA's token expired, so mark as unhealthy when there is no internet connection
-      # see: https://github.com/qdm12/gluetun/issues/641#issuecomment-933856220
-      test:
-        ["CMD", "curl", "--fail", "http://127.0.0.1:8080", "https://google.com"]
-      interval: 30s
-      retries: 10
-    network_mode: "service:vpn"
-    depends_on:
-      vpn:
-        condition: service_healthy
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.qbittorrent.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/qbittorrent`))
-      - traefik.http.routers.qbittorrent.tls=true
-      - traefik.http.routers.qbittorrent.tls.certresolver=myresolver
-      - traefik.http.services.qbittorrent.loadbalancer.server.port=8080
-      - traefik.http.routers.qbittorrent.middlewares=qbittorrent-strip-slash,qbittorrent-stripprefix
-      # https://github.com/qbittorrent/qBittorrent/issues/5693#issuecomment-552146296
-      - traefik.http.middlewares.qbittorrent-stripprefix.stripPrefix.prefixes=/qbittorrent
-      # https://community.traefik.io/t/middleware-to-add-the-if-needed/1895/19
-      - traefik.http.middlewares.qbittorrent-strip-slash.redirectregex.regex=(^.*\/qbittorrent$$)
-      - traefik.http.middlewares.qbittorrent-strip-slash.redirectregex.replacement=$$1/
-      - traefik.http.middlewares.qbittorrent-strip-slash.redirectregex.permanent=false
-      #- com.centurylinklabs.watchtower.depends-on=/vpn
-      - homepage.group=Download
-      - homepage.name=qBittorrent
-      - homepage.icon=qbittorrent.png
-      - homepage.href=/qbittorrent
-      - homepage.description=Bittorrent client
-      - homepage.weight=2
-      - homepage.widget.type=qbittorrent
-      - homepage.widget.url=http://vpn:8080
-      - homepage.widget.username=${QBITTORRENT_USERNAME}
-      - homepage.widget.password=${QBITTORRENT_PASSWORD}
+    networks:
+      - default
+
   vpn:
-    image: ghcr.io/thrnz/docker-wireguard-pia:latest
+    image: linuxserver/wireguard
     container_name: vpn
     volumes:
-      - ${CONFIG_ROOT:-.}/pia:/pia
-      - ${CONFIG_ROOT:-.}/pia-shared:/pia-shared
+      - ${CONFIG_ROOT:-.}/wireguard:/config
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     environment:
-      - LOC=${PIA_LOCATION}
-      - USER=${PIA_USER}
-      - PASS=${PIA_PASS}
       - QBT_USER=${QBITTORRENT_USERNAME}
       - QBT_PASS=${QBITTORRENT_PASSWORD}
       - LOCAL_NETWORK=${PIA_LOCAL_NETWORK}
@@ -360,27 +176,41 @@ services:
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
-    healthcheck:
-      test: ping -c 1 www.google.com || exit 1
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    networks:
+      - default
+      - vpn_network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
     restart: always
-  unpackerr:
-    image: ghcr.io/unpackerr/unpackerr:latest
-    container_name: unpackerr
-    volumes:
-      - ${DOWNLOAD_ROOT}:/data/torrents
-    restart: always
-    user: ${USER_ID}:${GROUP_ID}
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    networks:
+      - vpn_network
+      - default
     environment:
-      - TZ=${TIMEZONE}
-      - UN_SONARR_0_URL=http://sonarr:8989/sonarr
-      - UN_SONARR_0_API_KEY=${SONARR_API_KEY}
-      - UN_RADARR_0_URL=http://radarr:7878/radarr
-      - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
-    security_opt:
-      - no-new-privileges:true
+      - HOMEPAGE_VAR_TITLE=${HOMEPAGE_VAR_TITLE}
+      - HOMEPAGE_VAR_SEARCH_PROVIDER=${HOMEPAGE_VAR_SEARCH_PROVIDER}
+      - HOMEPAGE_VAR_HEADER_STYLE=${HOMEPAGE_VAR_HEADER_STYLE}
+      - HOMEPAGE_VAR_WEATHER_CITY=${HOMEPAGE_VAR_WEATHER_CITY}
+      - HOMEPAGE_VAR_WEATHER_LAT=${HOMEPAGE_VAR_WEATHER_LAT}
+      - HOMEPAGE_VAR_WEATHER_LONG=${HOMEPAGE_VAR_WEATHER_LONG}
+      - HOMEPAGE_VAR_WEATHER_TIME=${TIMEZONE}
+      - HOMEPAGE_VAR_WEATHER_UNIT=${HOMEPAGE_VAR_WEATHER_UNIT}
+      - HOMEPAGE_ALLOWED_HOSTS=*
+    volumes:
+      - ${CONFIG_ROOT:-.}/homepage:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${DATA_ROOT}:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
+    command:
+      [sh, -c, "cp -n /app/config/tpl/*.yaml /app/config && node server.js"]
   sabnzbd:
     image: lscr.io/linuxserver/sabnzbd:latest
     container_name: sabnzbd
@@ -390,28 +220,119 @@ services:
       - TZ=${TIMEZONE}
     volumes:
       - ${CONFIG_ROOT:-.}/sabnzbd:/config
-      - ${DATA_ROOT}:/data
-    restart: always
+      - ${DOWNLOAD_ROOT}:/data/torrents
+    networks:
+      - vpn_network
+      - default
+    ports:
+      - "${PORT:-8080}:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.sabnzbd.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/sabnzbd`) || PathPrefix(`/sabnzbd`))
-      - traefik.http.routers.sabnzbd.tls=true
-      - traefik.http.routers.sabnzbd.tls.certresolver=myresolver
-      - traefik.http.services.sabnzbd.loadbalancer.server.port=8080
       - homepage.group=Download
       - homepage.name=Sabnzbd
       - homepage.icon=sabnzbd.png
-      - homepage.href=/sabnzbd
-      - homepage.description=Usenet
-      - homepage.weight=3
+      - homepage.href=https://sabnzbd.${HOSTNAME}
+      - homepage.description=Usenet client
+      - homepage.weight=2
       - homepage.widget.type=sabnzbd
-      - homepage.widget.url=http://sabnzbd:8080/sabnzbd
+      - homepage.widget.url=http://sabnzbd:8085
       - homepage.widget.key=${SABNZBD_API_KEY}
-    profiles:
-      - sabnzbd
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+      - WEBUI_PORT=8080
+    volumes:
+      - ${CONFIG_ROOT:-.}/qbittorrent:/config
+      - ${DOWNLOAD_ROOT}:/data/torrents
+    network_mode: "service:vpn"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
+    labels:
+      - homepage.group=Download
+      - homepage.name=qBittorrent
+      - homepage.icon=qbittorrent.png
+      - homepage.href=https://qbittorrent.${HOSTNAME}
+      - homepage.description=Bittorrent client
+      - homepage.weight=2
+      - homepage.widget.type=qbittorrent
+      - homepage.widget.url=http://vpn:8080
+      - homepage.widget.username=${QBITTORRENT_USERNAME}
+      - homepage.widget.password=${QBITTORRENT_PASSWORD}
+
+  qb2:
+    image: qbittorrentofficial/qbittorrent-nox:latest
+    container_name: qb2
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+      - QBT_WEBUI_PORT=8181
+      - QBT_LEGAL_NOTICE=confirm
+    volumes:
+      - ${CONFIG_ROOT:-.}/qb2:/config
+      - ${DOWNLOAD2_ROOT}:/downloads
+    network_mode: "service:vpn"
+    restart: unless-stopped
+    labels:
+      - homepage.group=Download
+      - homepage.name=qBittorrent2
+      - homepage.icon=qbittorrent.png
+      - homepage.href=https://qb2.${HOSTNAME}
+      - homepage.description=Bittorrent client
+      - homepage.weight=2
+      - homepage.widget.type=qbittorrent
+      - homepage.widget.url=http://vpn:8181
+      - homepage.widget.username=${QBITTORRENT2_USERNAME}
+      - homepage.widget.password=${QBITTORRENT2_PASSWORD}
+  sonarr:
+    image: lscr.io/linuxserver/sonarr
+    container_name: sonarr
+    networks:
+      - vpn_network
+      - default
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ${CONFIG_ROOT:-.}/sonarr:/config
+      - ${DATA_ROOT}:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8989/sonarr/ping"]
+      interval: 30s
+      retries: 10
+    labels:
+      - homepage.group=Media
+      - homepage.name=Sonarr
+      - homepage.icon=sonarr.png
+      - homepage.href=https://sonarr.${HOSTNAME}
+      - homepage.description=Series management
+      - homepage.weight=0
+      - homepage.widget.type=sonarr
+      - homepage.widget.url=http://sonarr:8989/sonarr
+      - homepage.widget.key=${SONARR_API_KEY}
+
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
+    networks:
+      - vpn_network
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -423,65 +344,34 @@ services:
     ports:
       - "7359:7359/udp"
       - "1900:1900/udp"
-    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:8096/jellyfin/health"]
       interval: 30s
       retries: 10
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.jellyfin.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/jellyfin`))
-      - traefik.http.routers.jellyfin.tls=true
-      - traefik.http.routers.jellyfin.tls.certresolver=myresolver
-      - traefik.http.services.jellyfin.loadbalancer.server.port=8096
       - homepage.group=Media
       - homepage.name=Jellyfin
       - homepage.icon=jellyfin.png
-      - homepage.href=/jellyfin
+      - homepage.href=https://jellyfin.${HOSTNAME}
       - homepage.description=Media server
       - homepage.weight=4
       - homepage.widget.type=jellyfin
       - homepage.widget.url=http://jellyfin:8096/jellyfin
       - homepage.widget.key=${JELLYFIN_API_KEY}
-  calibre-web:
-    image: lscr.io/linuxserver/calibre-web:latest
-    container_name: calibre-web
-    environment:
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
-      - TZ=${TIMEZONE}
-      - DOCKER_MODS=linuxserver/mods:universal-calibre
-      - OAUTHLIB_RELAX_TOKEN_SCOPE=1
-    volumes:
-      - ${CONFIG_ROOT:-.}/calibre-web:/config
-      - ${DATA_ROOT}/books:/books
-    restart: unless-stopped
-    labels:
-      - traefik.enable=true
-      - traefik.http.middlewares.calibre-headers.headers.customRequestHeaders.X-Scheme=https
-      - traefik.http.middlewares.calibre-headers.headers.customRequestHeaders.X-Script-Name=/calibre
-      - traefik.http.middlewares.calibre-stripprefixregex.stripPrefixRegex.regex=/calibre
-      - traefik.http.routers.calibre.middlewares=calibre-headers,calibre-stripprefixregex
-      - traefik.http.routers.calibre.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/calibre`))
-      - traefik.http.routers.calibre.tls=true
-      - traefik.http.routers.calibre.tls.certresolver=myresolver
-      - traefik.http.services.calibre.loadbalancer.server.port=8083
-      - homepage.group=Media
-      - homepage.name=Calibre-Web
-      - homepage.icon=calibre-web.png
-      - homepage.href=/calibre
-      - homepage.description=Books management
-      - homepage.weight=5
-      - homepage.widget.type=calibreweb
-      - homepage.widget.url=http://calibre-web:8083
-      - homepage.widget.username=${CALIBRE_USERNAME}
-      - homepage.widget.password=${CALIBRE_PASSWORD}
-    profiles:
-      - calibre-web
+
   decluttarr:
     image: ghcr.io/manimatter/decluttarr:latest
     container_name: decluttarr
-    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -514,49 +404,177 @@ services:
       - IGNORED_DOWNLOAD_CLIENTS=${DECLUTTARR_IGNORED_DOWNLOAD_CLIENTS:-}
     profiles:
       - decluttarr
-  homepage:
-    image: ghcr.io/gethomepage/homepage:latest
-    container_name: homepage
-    environment:
-      - HOMEPAGE_VAR_TITLE=${HOMEPAGE_VAR_TITLE}
-      - HOMEPAGE_VAR_SEARCH_PROVIDER=${HOMEPAGE_VAR_SEARCH_PROVIDER}
-      - HOMEPAGE_VAR_HEADER_STYLE=${HOMEPAGE_VAR_HEADER_STYLE}
-      - HOMEPAGE_VAR_WEATHER_CITY=${HOMEPAGE_VAR_WEATHER_CITY}
-      - HOMEPAGE_VAR_WEATHER_LAT=${HOMEPAGE_VAR_WEATHER_LAT}
-      - HOMEPAGE_VAR_WEATHER_LONG=${HOMEPAGE_VAR_WEATHER_LONG}
-      - HOMEPAGE_VAR_WEATHER_TIME=${TIMEZONE}
-      - HOMEPAGE_VAR_WEATHER_UNIT=${HOMEPAGE_VAR_WEATHER_UNIT}
-      - HOMEPAGE_ALLOWED_HOSTS=${HOSTNAME}
-    volumes:
-      - ${CONFIG_ROOT:-.}/homepage:/app/config
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${DATA_ROOT}:/data
-    restart: always
-    command:
-      [sh, -c, "cp -n /app/config/tpl/*.yaml /app/config && node server.js"]
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.homepage.rule=(Host(`${HOSTNAME}`) && PathPrefix(`/`))
-      - traefik.http.routers.homepage.tls=true
-      - traefik.http.routers.homepage.tls.certresolver=myresolver
-      - traefik.http.services.homepage.loadbalancer.server.port=3000
+
   watchtower:
     image: ghcr.io/containrrr/watchtower:latest
     container_name: watchtower
-    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+    restart: unless-stopped
     environment:
       - WATCHTOWER_CLEANUP=true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-  autoheal:
-    image: willfarrell/autoheal:latest
-    container_name: autoheal
-    restart: always
-    environment:
-      - AUTOHEAL_CONTAINER_LABEL=all
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
 
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ${CONFIG_ROOT:-.}/prowlarr:/config
+    networks:
+      - default
+    ports:
+      - 9696:9696
+    restart: unless-stopped
+    labels:
+      - homepage.group=Media
+      - homepage.name=Prowlarr
+      - homepage.icon=prowlarr.png
+      - homepage.href=https://prowlarr.${HOSTNAME}
+      - homepage.description=Alerts manager
+      - homepage.weight=2
+      - homepage.widget.type=prowlarr
+      - homepage.widget.url=http://prowlarr:9696
+      - homepage.widget.key=${PROWLARR_API_KEY}
+
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    user: 1000:1000 # should be owner of volumes
+    ports:
+      - "4533:4533"
+    restart: unless-stopped
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ${CONFIG_ROOT:-.}/navidrome:/data
+      - ${DATA_ROOT}/music:/music:ro
+      - ${DATA_ROOT}/music_fixed:/music2:ro
+    networks:
+      - default
+    labels:
+      - homepage.group=Media
+      - homepage.name=Navidrome
+      - homepage.icon=navidrome.png
+      - homepage.href=https://navidrome.${HOSTNAME}
+      - homepage.description=Music server
+      - homepage.weight=4
+      - homepage.widget.type=navidrome
+      - homepage.widget.user=${NAVIDROME_USERNAME}
+      - homepage.widget.token=${NAVIDROME_TOKEN}
+      - homepage.widget.salt=${NAVIDROME_SALT}
+      - homepage.widget.url=http://navidrome:4533
+  magiclists:
+    extends:
+      file: ./magic-lists-for-navidrome/docker-compose.yml
+      service: magiclists
+    container_name: magiclists
+    environment:
+      - NAVIDROME_URL=http://navidrome:4533
+      - NAVIDROME_USERNAME=${NAVIDROME_USERNAME}
+      - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD}
+      - DATABASE_PATH=/app/data/magiclists.db
+      - AI_PROVIDER=${AI_PROVIDER:-google}
+      - AI_API_KEY=${AI_API_KEY}
+      - AI_MODEL=${AI_MODEL:-gemini-2.5-flash}
+      - ENABLE_MISSING_RECOMMENDATIONS=${ENABLE_MISSING_RECOMMENDATIONS:-true}
+      - APPEND_LIBRARY_MATCHES=${APPEND_LIBRARY_MATCHES:-true}
+      - MAX_SUGGESTED_MISSING=${MAX_SUGGESTED_MISSING:-10}
+    volumes:
+      - ./magiclists-data:/app/data
+    networks:
+      - default
+    restart: unless-stopped
+
+ # Readarr: The "Lidarr for books" (Automation & Acquisition)
+  bookshelf:
+    image: ghcr.io/pennydreadful/bookshelf:hardcover
+    container_name: bookshelf
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ${CONFIG_ROOT}/readarr:/config
+      - ${DATA_ROOT}/books:/books        # Final library location
+      - ${DATA_ROOT}/torrents/books:/data/torrents/books # Where your download client puts files
+    ports:
+      - 8787:8787
+    restart: unless-stopped
+    networks:
+      - default
+    labels:
+      - "homepage.group=Books"
+      - "homepage.name=Bookshelf"
+      - "homepage.icon=readarr.png"
+      - "homepage.href=https://bookshelf.${HOSTNAME}" # Replace with your IP/Port
+      - "homepage.description=Book Automation"
+      - "homepage.widget.type=bookshelf"
+      - "homepage.widget.url=http://bookshelf:8787"
+      - "homepage.widget.key=YOUR_API_KEY_HERE" # Get from Readarr > Settings > General
+  # Calibre: The Engine (Management & Conversion)
+  # Readarr connects to Calibre's "Content Server" to add/convert books
+  calibre:
+    image: lscr.io/linuxserver/calibre:latest
+    container_name: calibre
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ${CONFIG_ROOT}/calibre:/config
+      - ${DATA_ROOT}/books:/books        # MUST match Readarr's book volume
+    ports:
+      - 8079:8080 # Desktop GUI (via browser)
+      - 8081:8081 # Content Server (for Readarr integration)
+    restart: unless-stopped
+    networks:
+      - default
+    labels:
+      - "homepage.group=Books"
+      - "homepage.name=Calibre"
+      - "homepage.icon=calibre.png"
+      - "homepage.href=https://calibre.${HOSTNAME}" # Replace with your IP/Port
+      - "homepage.description=Ebook Management"
+  # Calibre-Web: The Interface (Beautiful UI for reading/browsing)
+  calibre-web:
+    image: lscr.io/linuxserver/calibre-web:latest
+    container_name: calibre-web
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+      - DOCKER_MODS=linuxserver/mods:universal-calibre # Enables ebook conversion
+    volumes:
+      - ${CONFIG_ROOT}/calibre-web:/config
+      - ${DATA_ROOT}/books:/books        # Points to the Calibre database
+    ports:
+      - 8083:8083
+    networks:
+      - default
+    restart: unless-stopped
+    labels:
+      - "homepage.group=Books"
+      - "homepage.name=Calibre-Web"
+      - "homepage.icon=calibre-web.png"
+      - "homepage.href=https://calibre-web.${HOSTNAME}" # Replace with your IP/Port
+      - "homepage.description=Digital Library UI"
+      - "homepage.widget.type=calibreweb"
+      - "homepage.widget.url=http://calibre-web:8083" # Use internal container name/port
+      - "homepage.widget.username=admin" # Optional: For stats
+      - "homepage.widget.password=admin123" # Optional: For stats
 networks:
   default:
     name: docker-compose-nas
+  vpn_network:
+    name: vpn_network
+    driver: bridge
